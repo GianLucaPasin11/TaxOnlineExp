@@ -8,6 +8,8 @@ doc = """
 Your app description
 """
 
+# TODO: eclusion and dropout logic to be revised entirely
+
 
 class Constants(BaseConstants):
     name_in_url = 'pggtax'
@@ -20,14 +22,14 @@ class Constants(BaseConstants):
     endowment = cu(100)
     tax_rate = 30
     tax_rate_percent = 0.30
-    multiplier = [1, 1, 2, 2]
-    multiplier_switch = {1: 2, 2: 1}
+    multipliers = [0.5, 0.5, 2, 2]
+    multiplier_switch = {0.5: 2, 2: 0.5}
     info = [False, True]
 
     belief_cond_fields = [f'cond_emp_{m + 1}' for m in range(3)] + [f'cond_norm_{n + 1}' for n in range(3)]
     belief_cond_maxmin = ['10$?', '15$?', '20$?'] * 2
 
-    timers = dict(decision=60 * 60, belief=60 * 2, belief_cond=60 * 4, results=60 * 1)
+    timers = dict(decision=60 * 0.2, belief=60 * 2, belief_cond=60 * 4, results=60 * 1)
 
 
 class Subsession(BaseSubsession):
@@ -45,7 +47,8 @@ class Group(BaseGroup):
 class Player(BasePlayer):
     dropout = models.BooleanField(initial=False)
 
-    contribution = models.CurrencyField(label='', min=0, max=Constants.endowment)
+    income = models.CurrencyField(label='', min=0, max=Constants.endowment)
+    tax_paid = models.CurrencyField()
 
     personalnormative = models.CurrencyField(label='Quanto reddito credi che le 3 persone del suo gruppo dovrebbero dichiarare, compresa lei stessa?', min=0, max=Constants.endowment)
 
@@ -71,29 +74,36 @@ class Player(BasePlayer):
     del n, f, l
 
 
-
 # What in your opinion will be the average number reported by other participants of this study?
 # FUNCTIONS
-def set_participant_vars_default(subsession):
-    for p in subsession.session.get_participants():
-        p.excluded, p.dropout = False, False
+def set_participant_vars_default(session: Subsession.session):
+    for p in session.get_participants():
+        p.excluded, p.dropout, p.pgg_tax_endowment = False, False, 0
 
 
 def creating_session(subsession: Subsession):
     const = Constants
 
-    groups = subsession.get_groups()
-    shuffle(groups)
-
-    multiplier = cycle(const.multiplier)
+    multipliers = cycle(const.multipliers)
     info = cycle(const.info)
     if subsession.round_number == 1:
-        set_participant_vars_default(subsession)
+        session = subsession.session
+        config = session.config
+        set_participant_vars_default(session)
+
+        ps = subsession.get_players()
+        shuffle(ps)
+        group_matrix = [ps[n:n + const.players_per_group] for n in range(0, len(ps), const.players_per_group)]
+        subsession.set_group_matrix(group_matrix)
+        groups = subsession.get_groups()
 
         for g in groups:
-            g.multiplier = next(multiplier)
-            g.info = subsession.session.config.get('info', next(info))
+            g.multiplier = next(multipliers)
+            g.info = config.get('info', next(info))
     else:
+        subsession.group_like_round(1)
+
+        groups = subsession.get_groups()
         for g in groups:
             prev_g = g.in_round(1)
             prev_multiplier = prev_g.multiplier
@@ -102,6 +112,10 @@ def creating_session(subsession: Subsession):
                 g.multiplier = prev_multiplier
             else:
                 g.multiplier = const.multiplier_switch[prev_multiplier]
+
+
+def set_tax_paid(player: Player):
+    player.tax_paid = player.income * Constants.tax_rate_percent
 
 
 def set_payoffs(group: Group):
@@ -113,12 +127,13 @@ def set_payoffs(group: Group):
 
     const = Constants
     ps = group.get_players()
-    tot = sum(p.contribution for p in ps if p.contribution is not None)
-    share = round(tot * group.multiplier / len(ps), 2)
+    # Total of taxed paid in the group
+    tot = sum(p.tax_paid for p in ps)
+    share = tot * group.multiplier / len(ps)
     group.tot = tot
     group.share = share
     for p in ps:
-        p.payoff = const.endowment - p.contribution + share
+        p.payoff = p.participant.pgg_tax_endowment - p.tax_paid + share
 
 
 def update_group(group: Group):
@@ -135,6 +150,7 @@ def update_group(group: Group):
 
 
 def set_participant_payoff(player: Player):
+    # TODO: update to deal with excluded players caused by dropouts
     participant = player.participant
     round_to_pay = randint(1, player.round_number)
     payoff_to_pay = player.in_round(round_to_pay).payoff
@@ -174,20 +190,30 @@ class NextTaskIntro(Page):
     def is_displayed(player: Player):
         return player.round_number == Constants.round_treatment_switch + 1
 
+
 class Instructions(Page):
     pass
+
 
 class Example(Page):
     pass
 
+
 class Decision(TaskPage):
     form_model = 'player'
-    form_fields = ['contribution']
+    form_fields = ['income']
     timeout_seconds = Constants.timers['decision']
 
     @staticmethod
     def vars_for_template(player: Player):
-        return dict(high=player.group.multiplier == Constants.multiplier[-1])
+        return dict(high=player.group.multiplier == Constants.multipliers[-1])
+
+    @staticmethod
+    def before_next_page(player: Player, timeout_happened):
+        super(Decision, Decision).before_next_page(player, timeout_happened)
+        if not timeout_happened:
+            set_tax_paid(player)
+
 
 class PNB(Page):
     form_model = 'player'
@@ -213,7 +239,7 @@ class CondCont(Page):
 #
 #     # @staticmethod
 #     # def vars_for_template(player: Player):
-#     #     return dict(high=player.group.multiplier == Constants.multiplier[-1])
+#     #     return dict(high=player.group.multiplier == Constants.multipliers[-1])
 #
 # class BeliefsCond(TaskPage):
 #     form_model = 'player'
@@ -242,7 +268,7 @@ class Results(TaskPage):
 
     @staticmethod
     def vars_for_template(player: Player):
-        return dict(high=player.group.multiplier == Constants.multiplier[-1])
+        return dict(high=player.group.multiplier == Constants.multipliers[-1])
 
     @staticmethod
     def before_next_page(player: Player, timeout_happened):

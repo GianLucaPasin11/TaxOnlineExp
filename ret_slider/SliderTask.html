@@ -57,14 +57,17 @@
         // When receive message from the server, update number of centered sliders and bonus earned so far
         function liveRecv(data) {
             $('#sliders_task_centered').html(data.num_centered);
-            $('#sliders_task_bonus').html(data.bonus + ' tokens')
+            $('#sliders_task_bonus').html(data.bonus);
+            if (data.finished) {
+                $('#form').submit();
+            }
         }
     </script>
 {{ endblock }}
 
 {{ block styles }}
     <!--Import style sheet from static folder of the current app-->
-    <link rel="stylesheet" type="text/css" href="{{ static 'sliders_task/css/sliders_task.css' }}">
+    <link rel="stylesheet" type="text/css" href="{{ static 'ret_slider/css/sliders_task.css' }}">
 {{ endblock }}
 
 {{ block title }}
